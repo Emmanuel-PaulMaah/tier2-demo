@@ -1,152 +1,141 @@
 <!doctype html>
-<html>
+<html lang="en">
 <head>
-  <meta charset="utf-8" />
-  <title>Sender • PeerJS head pose</title>
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <style>
-    body{font-family:system-ui,Segoe UI,Roboto,Arial,sans-serif;margin:16px}
-    video{width:320px;background:#000;border-radius:8px}
-    textarea{width:100%;height:90px}
-    .row{display:grid;grid-template-columns:1fr;gap:12px;max-width:740px}
-    .hud{font:12px/1.4 monospace;background:#f3f3f3;padding:8px;border-radius:6px}
-    .id{display:flex;gap:8px;align-items:center}
-    code{font:14px/1.4 ui-monospace,Menlo,Consolas,monospace;padding:2px 6px;background:#eee;border-radius:6px}
-    button{padding:8px 10px;border-radius:8px}
-  </style>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Sender • PeerJS Data (pose)</title>
+<style>
+  body{font-family:system-ui,Segoe UI,Roboto,Arial,sans-serif;margin:16px}
+  #controls{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+  #controls>*{padding:8px 10px;border-radius:8px}
+  #myId{font:14px/1.4 ui-monospace,Menlo,Consolas,monospace}
+  video{width:320px;background:#000;border-radius:8px;margin-top:12px}
+  details{margin-top:10px}
+  textarea{width:100%;height:120px}
+</style>
 </head>
 <body>
-  <h3>Sender</h3>
-  <div class="row">
-    <div class="id">
-      <div>Peer ID:</div>
-      <code id="peerId">…</code>
-      <button id="copyBtn">Copy</button>
-    </div>
-    <div class="hud" id="status">status: boot</div>
 
-    <video id="cam" autoplay playsinline muted></video>
+<div id="controls">
+  <button id="generateIdBtn">Generate My ID</button>
+  <input type="text" id="peerIdInput" placeholder="Peer ID to connect">
+  <button id="callBtn">Connect</button>
+  <button id="endBtn">End</button>
+  <span>Your ID: <strong id="myId"></strong></span>
+  <button id="copyIdBtn">Copy ID</button>
+</div>
 
-    <details>
-      <summary>Debug</summary>
-      <textarea id="logs" readonly></textarea>
-    </details>
-  </div>
+<video id="localVideo" autoplay muted playsinline></video>
 
-  <!-- PeerJS UMD (global window.Peer). Do NOT import as module. -->
-  <script src="https://cdn.jsdelivr.net/npm/peerjs@1.5.4/dist/peerjs.min.js"></script>
+<details>
+  <summary>Debug</summary>
+  <textarea id="logs" readonly></textarea>
+</details>
 
-  <script type="module">
-    // ---- random word ID
-    const WORDS = [
-      "atlas","holo","delta","quartz","nebula","vertex","sable","ion","zenith","optic",
-      "lumen","vortex","nova","pixel","quark","rivet","ember","prism","gamma","sigma",
-      "tango","echo","radar","kepler","rigel","sprint","orbit","apex","bond","cinder"
-    ];
-    function randId(){
-      const a = WORDS[Math.floor(Math.random()*WORDS.length)];
-      const b = WORDS[Math.floor(Math.random()*WORDS.length)];
-      const n = Math.floor(100+Math.random()*900);
-      return `${a}-${b}-${n}`; // e.g., nova-zenith-482
-    }
-    const peerId = randId();
+<script src="https://cdn.jsdelivr.net/npm/peerjs@1.5.4/dist/peerjs.min.js"></script>
+<script type="module">
+  // Random readable IDs
+  const WORDS = ["atlas","holo","delta","quartz","nebula","vertex","sable","ion","zenith","optic","lumen","vortex","nova","pixel","quark","rivet","ember","prism","gamma","sigma","tango","echo","radar","kepler","rigel","sprint","orbit","apex","bond","cinder"];
+  const randId = ()=>`${WORDS[Math.floor(Math.random()*WORDS.length)]}${Math.floor(100+Math.random()*900)}`;
 
-    const idEl = document.getElementById('peerId');
-    idEl.textContent = peerId;
-    document.getElementById('copyBtn').onclick = async () => {
-      try { await navigator.clipboard.writeText(peerId); } catch {}
-    };
+  const logEl = document.getElementById('logs');
+  const log = (s)=>{ logEl.value = (s+"\n"+logEl.value).slice(0,8000); };
+  const myIdEl = document.getElementById('myId');
+  const localVideo = document.getElementById('localVideo');
 
-    const logEl = document.getElementById('logs');
-    const statusEl = document.getElementById('status');
-    const log = (s)=>{ logEl.value = (s+"\n"+logEl.value).slice(0,8000); };
+  let peer = null, dc = null, localStream = null, landmarker = null, tickRAF = 0;
 
-    // ---- PeerJS
-    const PeerCtor = window.Peer;
-    // Use public PeerServer. For own infra: host:'your-peer-host', port:443, secure:true
-    const peer = new PeerCtor(peerId, {
-      host: '0.peerjs.com',
-      port: 443,
-      path: '/peerjs',
-      secure: true,
-      debug: 2,
-      config: {
-        iceServers: [
-          { urls: ['stun:stun.l.google.com:19302','stun:global.stun.twilio.com:3478'] }
-        ]
-      }
-    });
-    peer.on('disconnected', () => { peer.reconnect(); });
+  // Camera and mediapipe
+  async function initCamera(){
+    localStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "user", width: 640, height: 480 }, audio: false });
+    localVideo.srcObject = localStream;
 
-    let dataConn = null;
-
-    peer.on('open', id => { statusEl.textContent = `status: peer open (${id})`; });
-    peer.on('error', e => { statusEl.textContent = `status: peer error ${e.type}`; log(JSON.stringify(e)); });
-
-    peer.on('connection', (conn) => {
-      dataConn = conn;
-      statusEl.textContent = 'status: data channel connecting';
-      conn.on('open', () => { statusEl.textContent = 'status: data channel open'; conn.send(JSON.stringify({ ping: Date.now() })); });
-      conn.on('close', () => { statusEl.textContent = 'status: data channel closed'; });
-      conn.on('error', (e) => { statusEl.textContent = 'status: dc error'; log(e?.message||String(e)); });
-    });
-
-    // ---- Camera
-    const cam = document.getElementById('cam');
-    const stream = await navigator.mediaDevices.getUserMedia({
-      video: { facingMode: "user", width: 640, height: 480 }
-    });
-    cam.srcObject = stream;
-
-    // ---- MediaPipe Tasks Vision
-    const visionMod = await import('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.8');
-    const { FaceLandmarker, FilesetResolver } = visionMod;
-    const fileset = await FilesetResolver.forVisionTasks(
-      'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.8/wasm'
-    );
-    const landmarker = await FaceLandmarker.createFromOptions(fileset, {
-      baseOptions: {
-        modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task'
-      },
+    const vision = await import('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.8');
+    const { FaceLandmarker, FilesetResolver } = vision;
+    const fileset = await FilesetResolver.forVisionTasks('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.8/wasm');
+    landmarker = await FaceLandmarker.createFromOptions(fileset, {
+      baseOptions: { modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task' },
       runningMode: 'VIDEO',
       numFaces: 1,
       outputFaceBlendshapes: false,
       outputFacialTransformationMatrixes: true
     });
+  }
 
-    // ---- Mat4 -> quaternion
-    function matToQuat(m){
-      const m00=m[0], m11=m[5], m22=m[10];
-      const trace = m00+m11+m22;
-      let x,y,z,w;
-      if(trace>0){ const s=Math.sqrt(trace+1.0)*2; w=0.25*s; x=(m[9]-m[6])/s; y=(m[2]-m[8])/s; z=(m[4]-m[1])/s; }
-      else if(m00>m11 && m00>m22){ const s=Math.sqrt(1.0+m00-m11-m22)*2; w=(m[9]-m[6])/s; x=0.25*s; y=(m[1]+m[4])/s; z=(m[2]+m[8])/s; }
-      else if(m11>m22){ const s=Math.sqrt(1.0+m11-m00-m22)*2; w=(m[2]-m[8])/s; x=(m[1]+m[4])/s; y=0.25*s; z=(m[6]+m[9])/s; }
-      else { const s=Math.sqrt(1.0+m22-m00-m11)*2; w=(m[4]-m[1])/s; x=(m[2]+m[8])/s; y=(m[6]+m[9])/s; z=0.25*s; }
-      return {x,y,z,w};
-    }
+  function matToQuat(m){
+    const m00=m[0],m11=m[5],m22=m[10]; const tr=m00+m11+m22; let x,y,z,w;
+    if(tr>0){ const s=Math.sqrt(tr+1)*2; w=0.25*s; x=(m[9]-m[6])/s; y=(m[2]-m[8])/s; z=(m[4]-m[1])/s; }
+    else if(m00>m11 && m00>m22){ const s=Math.sqrt(1+m00-m11-m22)*2; w=(m[9]-m[6])/s; x=0.25*s; y=(m[1]+m[4])/s; z=(m[2]+m[8])/s; }
+    else if(m11>m22){ const s=Math.sqrt(1+m11-m00-m22)*2; w=(m[2]-m[8])/s; x=(m[1]+m[4])/s; y=0.25*s; z=(m[6]+m[9])/s; }
+    else { const s=Math.sqrt(1+m22-m00-m11)*2; w=(m[4]-m[1])/s; x=(m[2]+m[8])/s; y=(m[6]+m[9])/s; z=0.25*s; }
+    return {x,y,z,w};
+  }
 
-    // ---- Send at ~30 FPS
-    let last = 0;
-    async function tick(){
+  async function startSending(){
+    let last=0;
+    const loop = async ()=>{
       const now = performance.now();
-      if(now - last > 33){
-        const res = await landmarker.detectForVideo(cam, now);
-        if (res.facialTransformationMatrixes?.length){
-          const M = res.facialTransformationMatrixes[0].data;
-          const q = matToQuat(M);
-          if (dataConn && dataConn.open){
-            dataConn.send(JSON.stringify({ t: (now|0), q }));
-            statusEl.textContent = `status: sending q=(${q.x.toFixed(2)}, ${q.y.toFixed(2)}, ${q.z.toFixed(2)}, ${q.w.toFixed(2)})`;
-          } else {
-            statusEl.textContent = `status: waiting for receiver to connect • share ID "${peerId}"`;
-          }
+      if(landmarker && dc && dc.open && now-last>33){
+        const res = await landmarker.detectForVideo(localVideo, now);
+        if(res.facialTransformationMatrixes?.length){
+          const q = matToQuat(res.facialTransformationMatrixes[0].data);
+          dc.send(JSON.stringify({ t:(now|0), q }));
         }
         last = now;
       }
-      requestAnimationFrame(tick);
-    }
-    tick();
-  </script>
+      tickRAF = requestAnimationFrame(loop);
+    };
+    loop();
+  }
+
+  // PeerJS like FaceCall
+  const generateIdBtn = document.getElementById('generateIdBtn');
+  const callBtn = document.getElementById('callBtn');
+  const endBtn = document.getElementById('endBtn');
+  const peerIdInput = document.getElementById('peerIdInput');
+  const copyIdBtn = document.getElementById('copyIdBtn');
+
+  generateIdBtn.onclick = async () => {
+    await initCamera();
+    const id = randId();
+    peer = new Peer(id, {
+      host: '0.peerjs.com',
+      port: 443,
+      path: '/peerjs',
+      secure: true,
+      debug: 2,
+      config: { iceServers: [{urls:['stun:stun.l.google.com:19302','stun:global.stun.twilio.com:3478']}] }
+    });
+    peer.on('open', pid => { myIdEl.textContent = pid; log('peer open '+pid); });
+    peer.on('error', e => { log('peer error '+e.type); alert('PeerJS error: '+e); });
+    peer.on('connection', (conn) => {
+      dc = conn; wireDC();
+    });
+  };
+
+  callBtn.onclick = () => {
+    if (!peer) return alert('Generate your ID first');
+    const remoteId = peerIdInput.value.trim();
+    if (!remoteId) return alert('Enter a peer ID');
+    dc = peer.connect(remoteId, { reliable: true });
+    wireDC();
+  };
+
+  endBtn.onclick = () => {
+    if (dc) { try{ dc.close(); }catch{} }
+    if (peer) { try{ peer.disconnect(); }catch{} }
+    if (tickRAF) cancelAnimationFrame(tickRAF);
+    log('ended');
+  };
+
+  copyIdBtn.onclick = async ()=>{ if(!peer?.id) return alert('Generate ID first'); try{ await navigator.clipboard.writeText(peer.id); }catch{} };
+
+  function wireDC(){
+    dc.on('open', ()=>{ log('dc open'); startSending(); });
+    dc.on('close', ()=>{ log('dc close'); });
+    dc.on('error', e=>{ log('dc error '+e); });
+    dc.on('data', d=>{ log('rx '+d); }); // keep for sanity
+  }
+</script>
 </body>
 </html>
