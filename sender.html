@@ -43,7 +43,14 @@
       "lumen","vortex","nova","pixel","quark","rivet","ember","prism","gamma","sigma",
       "tango","echo","radar","kepler","rigel","sprint","orbit","apex","bond","cinder"
     ];
-    const peerId = WORDS[Math.floor(Math.random()*WORDS.length)];
+    function randId(){
+      const a = WORDS[Math.floor(Math.random()*WORDS.length)];
+      const b = WORDS[Math.floor(Math.random()*WORDS.length)];
+      const n = Math.floor(100+Math.random()*900);
+      return `${a}-${b}-${n}`; // e.g., nova-zenith-482
+    }
+    const peerId = randId();
+
     const idEl = document.getElementById('peerId');
     idEl.textContent = peerId;
     document.getElementById('copyBtn').onclick = async () => {
@@ -57,7 +64,20 @@
     // ---- PeerJS
     const PeerCtor = window.Peer;
     // Use public PeerServer. For own infra: host:'your-peer-host', port:443, secure:true
-    const peer = new PeerCtor(peerId, { host: 'peerjs.com', port: 443, secure: true });
+    const peer = new PeerCtor(peerId, {
+      host: '0.peerjs.com',
+      port: 443,
+      path: '/peerjs',
+      secure: true,
+      debug: 2,
+      config: {
+        iceServers: [
+          { urls: ['stun:stun.l.google.com:19302','stun:global.stun.twilio.com:3478'] }
+        ]
+      }
+    });
+    peer.on('disconnected', () => { peer.reconnect(); });
+
     let dataConn = null;
 
     peer.on('open', id => { statusEl.textContent = `status: peer open (${id})`; });
@@ -66,7 +86,7 @@
     peer.on('connection', (conn) => {
       dataConn = conn;
       statusEl.textContent = 'status: data channel connecting';
-      conn.on('open', () => { statusEl.textContent = 'status: data channel open'; });
+      conn.on('open', () => { statusEl.textContent = 'status: data channel open'; conn.send(JSON.stringify({ ping: Date.now() })); });
       conn.on('close', () => { statusEl.textContent = 'status: data channel closed'; });
       conn.on('error', (e) => { statusEl.textContent = 'status: dc error'; log(e?.message||String(e)); });
     });
