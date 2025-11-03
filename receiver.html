@@ -39,7 +39,20 @@
     // ---- PeerJS client
     const PeerCtor = window.Peer;
     // Create an anonymous peer; it will connect to sender's ID.
-    const me = new PeerCtor(undefined, { host: 'peerjs.com', port: 443, secure: true });
+    const me = new PeerCtor(undefined, {
+      host: '0.peerjs.com',
+      port: 443,
+      path: '/peerjs',
+      secure: true,
+      debug: 2,
+      config: {
+        iceServers: [
+          { urls: ['stun:stun.l.google.com:19302','stun:global.stun.twilio.com:3478'] }
+        ]
+      }
+    });
+    me.on('disconnected', () => { me.reconnect(); });
+
     let conn = null;
 
     me.on('open', id => { statusEl.textContent = `status: ready (local id ${id})`; });
@@ -51,6 +64,7 @@
       conn = me.connect(id, { reliable: true });
       statusEl.textContent = 'status: connecting…';
       conn.on('open', () => { statusEl.textContent = 'status: data channel open'; });
+      conn.send(JSON.stringify({ hello: 'receiver-online', t: Date.now() }));
       conn.on('data', onPoseMsg);
       conn.on('close', () => { statusEl.textContent = 'status: data channel closed'; });
       conn.on('error', (e)=>{ statusEl.textContent = 'status: dc error'; log(String(e)); });
@@ -135,11 +149,17 @@
 
     // Pose application
     function onPoseMsg(raw){
-      try{
-        const { q } = JSON.parse(raw);
-        if (placedObj.visible) placedObj.quaternion.set(q.x, q.y, q.z, q.w);
-      }catch(e){ /* ignore */ }
+  try{
+    const msg = JSON.parse(raw);
+    if (msg.q) {
+      if (placedObj.visible) placedObj.quaternion.set(msg.q.x, msg.q.y, msg.q.z, msg.q.w);
+      statusEl.textContent = 'status: pose packets ✓';
+    } else {
+      statusEl.textContent = 'status: data rx';
     }
+  }catch(e){}
+}
+
 
     // Render loop
     renderer.setAnimationLoop((t, frame)=>{
