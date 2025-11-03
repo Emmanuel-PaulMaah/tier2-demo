@@ -1,0 +1,160 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Receiver • AR + PeerJS</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    body{margin:0;overflow:hidden;font-family:system-ui,Segoe UI,Roboto,Arial,sans-serif}
+    #ui{position:fixed;inset:12px auto auto 12px;background:rgba(255,255,255,.92);padding:8px;border-radius:8px;max-width:56ch}
+    input,button{padding:8px 10px;border-radius:8px}
+    #hint{position:fixed;left:50%;transform:translateX(-50%);bottom:12px;background:rgba(0,0,0,.65);color:#fff;padding:6px 10px;border-radius:999px;font-size:12px}
+    textarea{width:100%;height:90px}
+  </style>
+</head>
+<body>
+  <div id="ui">
+    <div><strong>Receiver</strong></div>
+    <div style="display:flex;gap:8px;margin-top:6px">
+      <input id="peerId" placeholder="enter sender ID word, e.g. “nebula”" />
+      <button id="connectBtn">Connect</button>
+    </div>
+    <div id="status" style="font:12px/1.4 monospace;margin-top:6px">status: idle</div>
+    <details style="margin-top:6px"><summary>Debug</summary><textarea id="logs" readonly></textarea></details>
+  </div>
+  <div id="hint">Tap to place • Pinch to scale • Drag to move</div>
+
+  <!-- PeerJS UMD -->
+  <script src="https://cdn.jsdelivr.net/npm/peerjs@1.5.4/dist/peerjs.min.js"></script>
+
+  <script type="module">
+    // Three.js + ARButton
+    import * as THREE from 'https://cdn.jsdelivr.net/npm/three@0.160/build/three.module.js';
+    import { ARButton } from 'https://cdn.jsdelivr.net/npm/three@0.160/examples/jsm/webxr/ARButton.js';
+
+    const statusEl = document.getElementById('status');
+    const logEl = document.getElementById('logs');
+    const log = (s)=>{ logEl.value = (s+"\n"+logEl.value).slice(0,8000); };
+
+    // ---- PeerJS client
+    const PeerCtor = window.Peer;
+    // Create an anonymous peer; it will connect to sender's ID.
+    const me = new PeerCtor(undefined, { host: 'peerjs.com', port: 443, secure: true });
+    let conn = null;
+
+    me.on('open', id => { statusEl.textContent = `status: ready (local id ${id})`; });
+    me.on('error', e => { statusEl.textContent = `status: peer error ${e.type}`; log(JSON.stringify(e)); });
+
+    document.getElementById('connectBtn').onclick = () => {
+      const id = document.getElementById('peerId').value.trim();
+      if (!id) return;
+      conn = me.connect(id, { reliable: true });
+      statusEl.textContent = 'status: connecting…';
+      conn.on('open', () => { statusEl.textContent = 'status: data channel open'; });
+      conn.on('data', onPoseMsg);
+      conn.on('close', () => { statusEl.textContent = 'status: data channel closed'; });
+      conn.on('error', (e)=>{ statusEl.textContent = 'status: dc error'; log(String(e)); });
+    };
+
+    // ---- Three.js + WebXR scene
+    const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+    renderer.setSize(innerWidth, innerHeight);
+    renderer.xr.enabled = true;
+    document.body.appendChild(renderer.domElement);
+
+    const scene = new THREE.Scene();
+    const camera = new THREE.PerspectiveCamera();
+    scene.add(new THREE.HemisphereLight(0xffffff, 0x222233, 1.0));
+
+    // Reticle
+    const reticleGeo = new THREE.RingGeometry(0.14, 0.15, 32).rotateX(-Math.PI/2);
+    const reticle = new THREE.Mesh(reticleGeo, new THREE.MeshBasicMaterial({ color: 0x00aa88 }));
+    reticle.matrixAutoUpdate = false;
+    reticle.visible = false;
+    scene.add(reticle);
+
+    // Placeable object (replace with splat later)
+    const placedObj = new THREE.Mesh(
+      new THREE.BoxGeometry(0.4, 1.6, 0.3),
+      new THREE.MeshNormalMaterial()
+    );
+    placedObj.visible = false;
+    scene.add(placedObj);
+
+    // Anchor group
+    const anchor = new THREE.Group();
+    scene.add(anchor);
+
+    // Gestures
+    let scale = 1, dragging=false, lastTouch=null;
+    addEventListener('touchstart',(e)=>{ if(!placedObj.visible) return;
+      if(e.touches.length===1){ dragging=true; lastTouch=e.touches[0]; }
+    },{passive:false});
+    addEventListener('touchmove',(e)=>{ if(!placedObj.visible) return;
+      if(e.touches.length===1 && dragging){
+        const dx=(e.touches[0].clientX-lastTouch.clientX)/innerWidth;
+        const dz=(e.touches[0].clientY-lastTouch.clientY)/innerHeight;
+        anchor.position.x += dx;
+        anchor.position.z += dz;
+        lastTouch = e.touches[0];
+      } else if(e.touches.length===2){
+        const d=(p)=>Math.hypot(p[0].clientX-p[1].clientX,p[0].clientY-p[1].clientY);
+        if(lastTouch){ const prev=d([lastTouch,e.touches[0]]); const cur=d(e.touches);
+          if(prev>0){ const s=cur/prev; scale*=s; anchor.scale.setScalar(scale); }
+        }
+        lastTouch = e.touches[1];
+      }
+    },{passive:false});
+    addEventListener('touchend',()=>{ dragging=false; lastTouch=null; });
+
+    // Controller tap to place
+    const controller = renderer.xr.getController(0);
+    controller.addEventListener('select', () => {
+      if (!reticle.visible) return;
+      anchor.position.setFromMatrixPosition(reticle.matrix);
+      anchor.quaternion.setFromRotationMatrix(reticle.matrix);
+      placedObj.position.set(0, 0.8, 0);
+      placedObj.quaternion.identity();
+      placedObj.visible = true;
+      anchor.add(placedObj);
+    });
+    scene.add(controller);
+
+    // AR button
+    document.body.appendChild(ARButton.createButton(renderer, { requiredFeatures: ['hit-test'] }));
+
+    // XR session + hit test
+    let xrRefSpace=null, hitSrc=null;
+    renderer.xr.addEventListener('sessionstart', async ()=>{
+      const s = renderer.xr.getSession();
+      xrRefSpace = await s.requestReferenceSpace('local');
+      const viewerSpace = await s.requestReferenceSpace('viewer');
+      hitSrc = await s.requestHitTestSource({ space: viewerSpace });
+      s.addEventListener('end', ()=>{ xrRefSpace=null; hitSrc=null; });
+    });
+
+    // Pose application
+    function onPoseMsg(raw){
+      try{
+        const { q } = JSON.parse(raw);
+        if (placedObj.visible) placedObj.quaternion.set(q.x, q.y, q.z, q.w);
+      }catch(e){ /* ignore */ }
+    }
+
+    // Render loop
+    renderer.setAnimationLoop((t, frame)=>{
+      if(frame && hitSrc && xrRefSpace){
+        const hits = frame.getHitTestResults(hitSrc);
+        if(hits.length){
+          const pose = hits[0].getPose(xrRefSpace);
+          reticle.visible = true;
+          reticle.matrix.fromArray(pose.transform.matrix);
+        } else {
+          reticle.visible = false;
+        }
+      }
+      renderer.render(scene, camera);
+    });
+  </script>
+</body>
+</html>

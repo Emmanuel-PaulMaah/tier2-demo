@@ -1,0 +1,132 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Sender • PeerJS head pose</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    body{font-family:system-ui,Segoe UI,Roboto,Arial,sans-serif;margin:16px}
+    video{width:320px;background:#000;border-radius:8px}
+    textarea{width:100%;height:90px}
+    .row{display:grid;grid-template-columns:1fr;gap:12px;max-width:740px}
+    .hud{font:12px/1.4 monospace;background:#f3f3f3;padding:8px;border-radius:6px}
+    .id{display:flex;gap:8px;align-items:center}
+    code{font:14px/1.4 ui-monospace,Menlo,Consolas,monospace;padding:2px 6px;background:#eee;border-radius:6px}
+    button{padding:8px 10px;border-radius:8px}
+  </style>
+</head>
+<body>
+  <h3>Sender</h3>
+  <div class="row">
+    <div class="id">
+      <div>Peer ID:</div>
+      <code id="peerId">…</code>
+      <button id="copyBtn">Copy</button>
+    </div>
+    <div class="hud" id="status">status: boot</div>
+
+    <video id="cam" autoplay playsinline muted></video>
+
+    <details>
+      <summary>Debug</summary>
+      <textarea id="logs" readonly></textarea>
+    </details>
+  </div>
+
+  <!-- PeerJS UMD (global window.Peer). Do NOT import as module. -->
+  <script src="https://cdn.jsdelivr.net/npm/peerjs@1.5.4/dist/peerjs.min.js"></script>
+
+  <script type="module">
+    // ---- random word ID
+    const WORDS = [
+      "atlas","holo","delta","quartz","nebula","vertex","sable","ion","zenith","optic",
+      "lumen","vortex","nova","pixel","quark","rivet","ember","prism","gamma","sigma",
+      "tango","echo","radar","kepler","rigel","sprint","orbit","apex","bond","cinder"
+    ];
+    const peerId = WORDS[Math.floor(Math.random()*WORDS.length)];
+    const idEl = document.getElementById('peerId');
+    idEl.textContent = peerId;
+    document.getElementById('copyBtn').onclick = async () => {
+      try { await navigator.clipboard.writeText(peerId); } catch {}
+    };
+
+    const logEl = document.getElementById('logs');
+    const statusEl = document.getElementById('status');
+    const log = (s)=>{ logEl.value = (s+"\n"+logEl.value).slice(0,8000); };
+
+    // ---- PeerJS
+    const PeerCtor = window.Peer;
+    // Use public PeerServer. For own infra: host:'your-peer-host', port:443, secure:true
+    const peer = new PeerCtor(peerId, { host: 'peerjs.com', port: 443, secure: true });
+    let dataConn = null;
+
+    peer.on('open', id => { statusEl.textContent = `status: peer open (${id})`; });
+    peer.on('error', e => { statusEl.textContent = `status: peer error ${e.type}`; log(JSON.stringify(e)); });
+
+    peer.on('connection', (conn) => {
+      dataConn = conn;
+      statusEl.textContent = 'status: data channel connecting';
+      conn.on('open', () => { statusEl.textContent = 'status: data channel open'; });
+      conn.on('close', () => { statusEl.textContent = 'status: data channel closed'; });
+      conn.on('error', (e) => { statusEl.textContent = 'status: dc error'; log(e?.message||String(e)); });
+    });
+
+    // ---- Camera
+    const cam = document.getElementById('cam');
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: "user", width: 640, height: 480 }
+    });
+    cam.srcObject = stream;
+
+    // ---- MediaPipe Tasks Vision
+    const visionMod = await import('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.8');
+    const { FaceLandmarker, FilesetResolver } = visionMod;
+    const fileset = await FilesetResolver.forVisionTasks(
+      'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.8/wasm'
+    );
+    const landmarker = await FaceLandmarker.createFromOptions(fileset, {
+      baseOptions: {
+        modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task'
+      },
+      runningMode: 'VIDEO',
+      numFaces: 1,
+      outputFaceBlendshapes: false,
+      outputFacialTransformationMatrixes: true
+    });
+
+    // ---- Mat4 -> quaternion
+    function matToQuat(m){
+      const m00=m[0], m11=m[5], m22=m[10];
+      const trace = m00+m11+m22;
+      let x,y,z,w;
+      if(trace>0){ const s=Math.sqrt(trace+1.0)*2; w=0.25*s; x=(m[9]-m[6])/s; y=(m[2]-m[8])/s; z=(m[4]-m[1])/s; }
+      else if(m00>m11 && m00>m22){ const s=Math.sqrt(1.0+m00-m11-m22)*2; w=(m[9]-m[6])/s; x=0.25*s; y=(m[1]+m[4])/s; z=(m[2]+m[8])/s; }
+      else if(m11>m22){ const s=Math.sqrt(1.0+m11-m00-m22)*2; w=(m[2]-m[8])/s; x=(m[1]+m[4])/s; y=0.25*s; z=(m[6]+m[9])/s; }
+      else { const s=Math.sqrt(1.0+m22-m00-m11)*2; w=(m[4]-m[1])/s; x=(m[2]+m[8])/s; y=(m[6]+m[9])/s; z=0.25*s; }
+      return {x,y,z,w};
+    }
+
+    // ---- Send at ~30 FPS
+    let last = 0;
+    async function tick(){
+      const now = performance.now();
+      if(now - last > 33){
+        const res = await landmarker.detectForVideo(cam, now);
+        if (res.facialTransformationMatrixes?.length){
+          const M = res.facialTransformationMatrixes[0].data;
+          const q = matToQuat(M);
+          if (dataConn && dataConn.open){
+            dataConn.send(JSON.stringify({ t: (now|0), q }));
+            statusEl.textContent = `status: sending q=(${q.x.toFixed(2)}, ${q.y.toFixed(2)}, ${q.z.toFixed(2)}, ${q.w.toFixed(2)})`;
+          } else {
+            statusEl.textContent = `status: waiting for receiver to connect • share ID "${peerId}"`;
+          }
+        }
+        last = now;
+      }
+      requestAnimationFrame(tick);
+    }
+    tick();
+  </script>
+</body>
+</html>
