@@ -3,29 +3,29 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1" />
-<title>Sender • PeerJS Data (pose)</title>
+<title>Receiver • AR + PeerJS Data</title>
 <style>
-  body{font-family:system-ui,Segoe UI,Roboto,Arial,sans-serif;margin:16px}
-  #controls{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
-  #controls>*{padding:8px 10px;border-radius:8px}
-  #myId{font:14px/1.4 ui-monospace,Menlo,Consolas,monospace}
-  video{width:320px;background:#000;border-radius:8px;margin-top:12px}
-  details{margin-top:10px}
+  body{margin:0;overflow:hidden;font-family:system-ui,Segoe UI,Roboto,Arial,sans-serif}
+  #controls{position:fixed;inset:12px auto auto 12px;background:rgba(255,255,255,.92);padding:8px;border-radius:8px;display:flex;flex-wrap:wrap;gap:8px;align-items:center;max-width:70ch}
+  #myId{font:12px/1.4 ui-monospace,Menlo,Consolas,monospace}
+  #hint{position:fixed;left:50%;transform:translateX(-50%);bottom:12px;background:rgba(0,0,0,.65);color:#fff;padding:6px 10px;border-radius:999px;font-size:12px}
+  details{position:fixed;right:12px;bottom:12px;width:min(90vw,420px)}
   textarea{width:100%;height:120px}
+  input,button{padding:8px 10px;border-radius:8px}
 </style>
 </head>
 <body>
 
 <div id="controls">
   <button id="generateIdBtn">Generate My ID</button>
-  <input type="text" id="peerIdInput" placeholder="Peer ID to connect">
+  <input type="text" id="peerIdInput" placeholder="Sender ID to connect">
   <button id="callBtn">Connect</button>
   <button id="endBtn">End</button>
   <span>Your ID: <strong id="myId"></strong></span>
   <button id="copyIdBtn">Copy ID</button>
+  <span id="status" style="font:12px/1.4 monospace">status: idle</span>
 </div>
-
-<video id="localVideo" autoplay muted playsinline></video>
+<div id="hint">Tap to place • Pinch to scale • Drag to move</div>
 
 <details>
   <summary>Debug</summary>
@@ -34,69 +34,24 @@
 
 <script src="https://cdn.jsdelivr.net/npm/peerjs@1.5.4/dist/peerjs.min.js"></script>
 <script type="module">
-  // Random readable IDs
+  // Three.js + WebXR
+  import * as THREE from 'https://cdn.jsdelivr.net/npm/three@0.160/build/three.module.js';
+  import { ARButton } from 'https://cdn.jsdelivr.net/npm/three@0.160/examples/jsm/webxr/ARButton.js';
+
+  // Debug
+  const logEl = document.getElementById('logs');
+  const statusEl = document.getElementById('status');
+  const log = (s)=>{ logEl.value = (s+"\n"+logEl.value).slice(0,8000); };
+
+  // Random IDs
   const WORDS = ["atlas","holo","delta","quartz","nebula","vertex","sable","ion","zenith","optic","lumen","vortex","nova","pixel","quark","rivet","ember","prism","gamma","sigma","tango","echo","radar","kepler","rigel","sprint","orbit","apex","bond","cinder"];
   const randId = ()=>`${WORDS[Math.floor(Math.random()*WORDS.length)]}${Math.floor(100+Math.random()*900)}`;
 
-  const logEl = document.getElementById('logs');
-  const log = (s)=>{ logEl.value = (s+"\n"+logEl.value).slice(0,8000); };
+  // PeerJS
+  let peer=null, dc=null;
   const myIdEl = document.getElementById('myId');
-  const localVideo = document.getElementById('localVideo');
 
-  let peer = null, dc = null, localStream = null, landmarker = null, tickRAF = 0;
-
-  // Camera and mediapipe
-  async function initCamera(){
-    localStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "user", width: 640, height: 480 }, audio: false });
-    localVideo.srcObject = localStream;
-
-    const vision = await import('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.8');
-    const { FaceLandmarker, FilesetResolver } = vision;
-    const fileset = await FilesetResolver.forVisionTasks('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.8/wasm');
-    landmarker = await FaceLandmarker.createFromOptions(fileset, {
-      baseOptions: { modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task' },
-      runningMode: 'VIDEO',
-      numFaces: 1,
-      outputFaceBlendshapes: false,
-      outputFacialTransformationMatrixes: true
-    });
-  }
-
-  function matToQuat(m){
-    const m00=m[0],m11=m[5],m22=m[10]; const tr=m00+m11+m22; let x,y,z,w;
-    if(tr>0){ const s=Math.sqrt(tr+1)*2; w=0.25*s; x=(m[9]-m[6])/s; y=(m[2]-m[8])/s; z=(m[4]-m[1])/s; }
-    else if(m00>m11 && m00>m22){ const s=Math.sqrt(1+m00-m11-m22)*2; w=(m[9]-m[6])/s; x=0.25*s; y=(m[1]+m[4])/s; z=(m[2]+m[8])/s; }
-    else if(m11>m22){ const s=Math.sqrt(1+m11-m00-m22)*2; w=(m[2]-m[8])/s; x=(m[1]+m[4])/s; y=0.25*s; z=(m[6]+m[9])/s; }
-    else { const s=Math.sqrt(1+m22-m00-m11)*2; w=(m[4]-m[1])/s; x=(m[2]+m[8])/s; y=(m[6]+m[9])/s; z=0.25*s; }
-    return {x,y,z,w};
-  }
-
-  async function startSending(){
-    let last=0;
-    const loop = async ()=>{
-      const now = performance.now();
-      if(landmarker && dc && dc.open && now-last>33){
-        const res = await landmarker.detectForVideo(localVideo, now);
-        if(res.facialTransformationMatrixes?.length){
-          const q = matToQuat(res.facialTransformationMatrixes[0].data);
-          dc.send(JSON.stringify({ t:(now|0), q }));
-        }
-        last = now;
-      }
-      tickRAF = requestAnimationFrame(loop);
-    };
-    loop();
-  }
-
-  // PeerJS like FaceCall
-  const generateIdBtn = document.getElementById('generateIdBtn');
-  const callBtn = document.getElementById('callBtn');
-  const endBtn = document.getElementById('endBtn');
-  const peerIdInput = document.getElementById('peerIdInput');
-  const copyIdBtn = document.getElementById('copyIdBtn');
-
-  generateIdBtn.onclick = async () => {
-    await initCamera();
+  document.getElementById('generateIdBtn').onclick = () => {
     const id = randId();
     peer = new Peer(id, {
       host: '0.peerjs.com',
@@ -106,36 +61,106 @@
       debug: 2,
       config: { iceServers: [{urls:['stun:stun.l.google.com:19302','stun:global.stun.twilio.com:3478']}] }
     });
-    peer.on('open', pid => { myIdEl.textContent = pid; log('peer open '+pid); });
-    peer.on('error', e => { log('peer error '+e.type); alert('PeerJS error: '+e); });
-    peer.on('connection', (conn) => {
-      dc = conn; wireDC();
-    });
+    peer.on('open', pid=>{ myIdEl.textContent = pid; log('peer open '+pid); });
+    peer.on('error', e=>{ log('peer error '+e.type); alert('PeerJS error: '+e); });
+    peer.on('connection', (conn)=>{ dc = conn; wireDC(); });
   };
 
-  callBtn.onclick = () => {
-    if (!peer) return alert('Generate your ID first');
-    const remoteId = peerIdInput.value.trim();
-    if (!remoteId) return alert('Enter a peer ID');
-    dc = peer.connect(remoteId, { reliable: true });
+  document.getElementById('callBtn').onclick = ()=>{
+    if(!peer) return alert('Generate your ID first');
+    const target = document.getElementById('peerIdInput').value.trim();
+    if(!target) return alert('Enter sender ID');
+    dc = peer.connect(target, { reliable: true });
     wireDC();
   };
 
-  endBtn.onclick = () => {
-    if (dc) { try{ dc.close(); }catch{} }
-    if (peer) { try{ peer.disconnect(); }catch{} }
-    if (tickRAF) cancelAnimationFrame(tickRAF);
+  document.getElementById('endBtn').onclick = ()=>{
+    if(dc) { try{ dc.close(); }catch{} }
+    if(peer) { try{ peer.disconnect(); }catch{} }
     log('ended');
   };
 
-  copyIdBtn.onclick = async ()=>{ if(!peer?.id) return alert('Generate ID first'); try{ await navigator.clipboard.writeText(peer.id); }catch{} };
+  document.getElementById('copyIdBtn').onclick = async ()=>{ if(!peer?.id) return alert('Generate ID first'); try{ await navigator.clipboard.writeText(peer.id); }catch{} };
 
   function wireDC(){
-    dc.on('open', ()=>{ log('dc open'); startSending(); });
-    dc.on('close', ()=>{ log('dc close'); });
-    dc.on('error', e=>{ log('dc error '+e); });
-    dc.on('data', d=>{ log('rx '+d); }); // keep for sanity
+    dc.on('open', ()=>{ statusEl.textContent='status: data open'; log('dc open'); dc.send(JSON.stringify({ hello:'receiver-online', t:Date.now() })); });
+    dc.on('close', ()=>{ statusEl.textContent='status: data closed'; log('dc close'); });
+    dc.on('error', e=>{ statusEl.textContent='status: data error'; log('dc error '+e); });
+    dc.on('data', onPoseMsg);
   }
+
+  // Three.js scene
+  const renderer = new THREE.WebGLRenderer({ antialias:true, alpha:true });
+  renderer.setSize(innerWidth, innerHeight);
+  renderer.xr.enabled = true;
+  document.body.appendChild(renderer.domElement);
+
+  const scene = new THREE.Scene();
+  const camera = new THREE.PerspectiveCamera();
+  scene.add(new THREE.HemisphereLight(0xffffff,0x222233,1.0));
+
+  // Reticle
+  const reticle = new THREE.Mesh(new THREE.RingGeometry(0.14,0.15,32).rotateX(-Math.PI/2), new THREE.MeshBasicMaterial({color:0x00aa88}));
+  reticle.matrixAutoUpdate = false; reticle.visible=false; scene.add(reticle);
+
+  // Placeable object
+  const placedObj = new THREE.Mesh(new THREE.BoxGeometry(0.4,1.6,0.3), new THREE.MeshNormalMaterial());
+  placedObj.visible=false; scene.add(placedObj);
+
+  const anchor = new THREE.Group(); scene.add(anchor);
+
+  // Gestures
+  let scale=1, dragging=false, lastTouch=null;
+  addEventListener('touchstart',(e)=>{ if(!placedObj.visible) return; if(e.touches.length===1){ dragging=true; lastTouch=e.touches[0]; } },{passive:false});
+  addEventListener('touchmove',(e)=>{ if(!placedObj.visible) return;
+    if(e.touches.length===1 && dragging){ const dx=(e.touches[0].clientX-lastTouch.clientX)/innerWidth; const dz=(e.touches[0].clientY-lastTouch.clientY)/innerHeight; anchor.position.x+=dx; anchor.position.z+=dz; lastTouch=e.touches[0]; }
+    else if(e.touches.length===2){ const d=(p)=>Math.hypot(p[0].clientX-p[1].clientX,p[0].clientY-p[1].clientY); if(lastTouch){ const prev=d([lastTouch,e.touches[0]]); const cur=d(e.touches); if(prev>0){ const s=cur/prev; scale*=s; anchor.scale.setScalar(scale); } } lastTouch=e.touches[1]; }
+  },{passive:false});
+  addEventListener('touchend',()=>{ dragging=false; lastTouch=null; });
+
+  // Tap to place
+  const controller = renderer.xr.getController(0);
+  controller.addEventListener('select', ()=>{
+    if(!reticle.visible) return;
+    anchor.position.setFromMatrixPosition(reticle.matrix);
+    anchor.quaternion.setFromRotationMatrix(reticle.matrix);
+    placedObj.position.set(0,0.8,0);
+    placedObj.quaternion.identity();
+    placedObj.visible=true;
+    anchor.add(placedObj);
+  });
+  scene.add(controller);
+
+  // AR button
+  document.body.appendChild(ARButton.createButton(renderer,{ requiredFeatures:['hit-test'] }));
+
+  // Hit test
+  let xrRef=null, hitSrc=null;
+  renderer.xr.addEventListener('sessionstart', async ()=>{
+    const s = renderer.xr.getSession();
+    xrRef = await s.requestReferenceSpace('local');
+    const viewer = await s.requestReferenceSpace('viewer');
+    hitSrc = await s.requestHitTestSource({ space: viewer });
+    s.addEventListener('end', ()=>{ xrRef=null; hitSrc=null; });
+  });
+
+  function onPoseMsg(raw){
+    try{
+      const msg = JSON.parse(raw);
+      if(msg.q && placedObj.visible){
+        placedObj.quaternion.set(msg.q.x, msg.q.y, msg.q.z, msg.q.w);
+        statusEl.textContent = 'status: pose packets ✓';
+      }
+    }catch{}
+  }
+
+  renderer.setAnimationLoop((t,frame)=>{
+    if(frame && hitSrc && xrRef){
+      const hits = frame.getHitTestResults(hitSrc);
+      if(hits.length){ const pose = hits[0].getPose(xrRef); reticle.visible=true; reticle.matrix.fromArray(pose.transform.matrix); } else { reticle.visible=false; }
+    }
+    renderer.render(scene,camera);
+  });
 </script>
 </body>
 </html>
